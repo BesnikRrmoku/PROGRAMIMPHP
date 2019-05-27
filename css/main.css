@@ -2375,6 +2375,49 @@ h2.title {
   padding: 8px;
   width: 100%;
 }
+.replay-box form input:hover, 
+.text-area textarea:hover {
+  border: 1px solid #FE980F;
+}
+
+.text-area {
+  margin-top: 66px
+}
+
+.text-area textarea {
+  background: transparent;
+  border: 1px solid#F7F7F0
+}
+
+.btn.btn-primary {
+  background:#FE980F;
+  border: 0 none;
+  border-radius: 0;
+  margin-top: 16px;
+}
+
+.blank-arrow {
+  position: relative;
+}
+
+.blank-arrow label:after {
+  content: "";
+  position: absolute;
+  width: auto;
+  height: auto;
+  border-style: solid;
+  border-width: 8px;
+  border-color:#FE980F transparent transparent transparent;
+  top: 25px;
+  left: 5px
+} 
+
+
+
+/*************************
+******* Contact CSS ********
+**************************/
+
 
 
 
