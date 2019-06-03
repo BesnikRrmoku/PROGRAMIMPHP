@@ -2029,3 +2029,796 @@ class PHPMailer {
     $encoded = substr($encoded, 0, -strlen($lf));
     return $encoded;
   }
+    /**
+    * Encode string to quoted-printable.
+    * Only uses standard PHP, slow, but will always work
+    * @access public
+     * @param string $input
+    * @param integer $line_max Number of chars allowed on a line before wrapping
+     * @param bool $space_conv
+     * @internal param string $string the text to encode
+    * @return string
+    */
+    public function EncodeQPphp( $input = '', $line_max = 76, $space_conv = false) {
+      $hex = array('0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F');
+      $lines = preg_split('/(?:\r\n|\r|\n)/', $input);
+      $eol = "\r\n";
+      $escape = '=';
+      $output = '';
+      while( list(, $line) = each($lines) ) {
+        $linlen = strlen($line);
+        $newline = '';
+        for($i = 0; $i < $linlen; $i++) {
+          $c = substr( $line, $i, 1 );
+          $dec = ord( $c );
+          if ( ( $i == 0 ) && ( $dec == 46 ) ) { // convert first point in the line into =2E
+            $c = '=2E';
+          }
+          if ( $dec == 32 ) {
+            if ( $i == ( $linlen - 1 ) ) { // convert space at eol only
+              $c = '=20';
+            } else if ( $space_conv ) {
+              $c = '=20';
+            }
+          } elseif ( ($dec == 61) || ($dec < 32 ) || ($dec > 126) ) { // always encode "\t", which is *not* required
+            $h2 = (integer)floor($dec/16);
+            $h1 = (integer)floor($dec%16);
+            $c = $escape.$hex[$h2].$hex[$h1];
+          }
+          if ( (strlen($newline) + strlen($c)) >= $line_max ) { // CRLF is not counted
+            $output .= $newline.$escape.$eol; //  soft line break; " =\r\n" is okay
+            $newline = '';
+            // check if newline first character will be point or not
+            if ( $dec == 46 ) {
+              $c = '=2E';
+            }
+          }
+          $newline .= $c;
+        } // end of for
+        $output .= $newline.$eol;
+      } // end of while
+      return $output;
+    }
+
+    /**
+    * Encode string to RFC2045 (6.7) quoted-printable format
+    * Uses a PHP5 stream filter to do the encoding about 64x faster than the old version
+    * Also results in same content as you started with after decoding
+    * @see EncodeQPphp()
+    * @access public
+    * @param string $string the text to encode
+    * @param integer $line_max Number of chars allowed on a line before wrapping
+    * @param boolean $space_conv Dummy param for compatibility with existing EncodeQP function
+    * @return string
+    * @author Marcus Bointon
+    */
+    public function EncodeQP($string, $line_max = 76, $space_conv = false) {
+      if (function_exists('quoted_printable_encode')) { //Use native function if it's available (>= PHP5.3)
+        return quoted_printable_encode($string);
+      }
+      $filters = stream_get_filters();
+      if (!in_array('convert.*', $filters)) { //Got convert stream filter?
+        return $this->EncodeQPphp($string, $line_max, $space_conv); //Fall back to old implementation
+      }
+      $fp = fopen('php://temp/', 'r+');
+      $string = preg_replace('/\r\n?/', $this->LE, $string); //Normalise line breaks
+      $params = array('line-length' => $line_max, 'line-break-chars' => $this->LE);
+      $s = stream_filter_append($fp, 'convert.quoted-printable-encode', STREAM_FILTER_READ, $params);
+      fputs($fp, $string);
+      rewind($fp);
+      $out = stream_get_contents($fp);
+      stream_filter_remove($s);
+      $out = preg_replace('/^\./m', '=2E', $out); //Encode . if it is first char on a line, workaround for bug in Exchange
+      fclose($fp);
+      return $out;
+    }
+
+    /**
+     * Encode string to q encoding.
+     * @link http://tools.ietf.org/html/rfc2047
+     * @param string $str the text to encode
+     * @param string $position Where the text is going to be used, see the RFC for what that means
+     * @access public
+     * @return string
+     */
+    public function EncodeQ($str, $position = 'text') {
+      //There should not be any EOL in the string
+    $pattern="";
+      $encoded = str_replace(array("\r", "\n"), '', $str);
+      switch (strtolower($position)) {
+        case 'phrase':
+          $pattern = '^A-Za-z0-9!*+\/ -';
+          break;
+
+        case 'comment':
+          $pattern = '\(\)"';
+          //note that we dont break here!
+          //for this reason we build the $pattern withoud including delimiters and []
+
+        case 'text':
+        default:
+          //Replace every high ascii, control =, ? and _ characters
+          //We put \075 (=) as first value to make sure it's the first one in being converted, preventing double encode
+          $pattern = '\075\000-\011\013\014\016-\037\077\137\177-\377' . $pattern;
+          break;
+      }
+      
+      if (preg_match_all("/[{$pattern}]/", $encoded, $matches)) {
+        foreach (array_unique($matches[0]) as $char) {
+          $encoded = str_replace($char, '=' . sprintf('%02X', ord($char)), $encoded);
+        }
+      }
+      
+      //Replace every spaces to _ (more readable than =20)
+      return str_replace(' ', '_', $encoded);
+  }
+
+
+    /**
+     * Adds a string or binary attachment (non-filesystem) to the list.
+     * This method can be used to attach ascii or binary data,
+     * such as a BLOB record from a database.
+     * @param string $string String attachment data.
+     * @param string $filename Name of the attachment.
+     * @param string $encoding File encoding (see $Encoding).
+     * @param string $type File extension (MIME) type.
+     * @return void
+     */
+    public function AddStringAttachment($string, $filename, $encoding = 'base64', $type = 'application/octet-stream') {
+      // Append to $attachment array
+      $this->attachment[] = array(
+        0 => $string,
+        1 => $filename,
+        2 => basename($filename),
+        3 => $encoding,
+        4 => $type,
+        5 => true,  // isStringAttachment
+        6 => 'attachment',
+        7 => 0
+      );
+    }
+
+    /**
+     * Adds an embedded attachment.  This can include images, sounds, and
+     * just about any other document.  Make sure to set the $type to an
+     * image type.  For JPEG images use "image/jpeg" and for GIF images
+     * use "image/gif".
+     * @param string $path Path to the attachment.
+     * @param string $cid Content ID of the attachment.  Use this to identify
+     *        the Id for accessing the image in an HTML form.
+     * @param string $name Overrides the attachment name.
+     * @param string $encoding File encoding (see $Encoding).
+     * @param string $type File extension (MIME) type.
+     * @return bool
+     */
+    public function AddEmbeddedImage($path, $cid, $name = '', $encoding = 'base64', $type = 'application/octet-stream') {
+
+      if ( !@is_file($path) ) {
+        $this->SetError($this->Lang('file_access') . $path);
+        return false;
+      }
+
+      $filename = basename($path);
+      if ( $name == '' ) {
+        $name = $filename;
+      }
+
+      // Append to $attachment array
+      $this->attachment[] = array(
+        0 => $path,
+        1 => $filename,
+        2 => $name,
+        3 => $encoding,
+        4 => $type,
+        5 => false,  // isStringAttachment
+        6 => 'inline',
+        7 => $cid
+      );
+
+      return true;
+    }
+
+    /**
+     * Adds an embedded stringified attachment.  This can include images, sounds, and
+     * just about any other document.  Make sure to set the $type to an
+     * image type.  For JPEG images use "image/jpeg" and for GIF images
+     * use "image/gif".
+     * @param string $string The attachment.
+     * @param string $cid Content ID of the attachment.  Use this to identify
+     *        the Id for accessing the image in an HTML form.
+     * @param string $name Overrides the attachment name.
+     * @param string $encoding File encoding (see $Encoding).
+     * @param string $type File extension (MIME) type.
+     * @return bool
+     */
+    public function AddStringEmbeddedImage($string, $cid, $name = '', $encoding = 'base64', $type = 'application/octet-stream') {
+      // Append to $attachment array
+      $this->attachment[] = array(
+        0 => $string,
+        1 => $name,
+        2 => $name,
+        3 => $encoding,
+        4 => $type,
+        5 => true,  // isStringAttachment
+        6 => 'inline',
+        7 => $cid
+      );
+    }
+
+    /**
+     * Returns true if an inline attachment is present.
+     * @access public
+     * @return bool
+     */
+    public function InlineImageExists() {
+      foreach($this->attachment as $attachment) {
+        if ($attachment[6] == 'inline') {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /**
+     * Returns true if an attachment (non-inline) is present.
+     * @return bool
+     */
+    public function AttachmentExists() {
+      foreach($this->attachment as $attachment) {
+        if ($attachment[6] == 'attachment') {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /**
+     * Does this message have an alternative body set?
+     * @return bool
+     */
+    public function AlternativeExists() {
+      return !empty($this->AltBody);
+    }
+
+    /////////////////////////////////////////////////
+    // CLASS METHODS, MESSAGE RESET
+    /////////////////////////////////////////////////
+
+    /**
+     * Clears all recipients assigned in the TO array.  Returns void.
+     * @return void
+     */
+    public function ClearAddresses() {
+      foreach($this->to as $to) {
+        unset($this->all_recipients[strtolower($to[0])]);
+      }
+      $this->to = array();
+    }
+
+    /**
+     * Clears all recipients assigned in the CC array.  Returns void.
+     * @return void
+     */
+    public function ClearCCs() {
+      foreach($this->cc as $cc) {
+        unset($this->all_recipients[strtolower($cc[0])]);
+      }
+      $this->cc = array();
+    }
+
+    /**
+     * Clears all recipients assigned in the BCC array.  Returns void.
+     * @return void
+     */
+    public function ClearBCCs() {
+      foreach($this->bcc as $bcc) {
+        unset($this->all_recipients[strtolower($bcc[0])]);
+      }
+      $this->bcc = array();
+    }
+
+    /**
+     * Clears all recipients assigned in the ReplyTo array.  Returns void.
+     * @return void
+     */
+    public function ClearReplyTos() {
+      $this->ReplyTo = array();
+    }
+
+    /**
+     * Clears all recipients assigned in the TO, CC and BCC
+     * array.  Returns void.
+     * @return void
+     */
+    public function ClearAllRecipients() {
+      $this->to = array();
+      $this->cc = array();
+      $this->bcc = array();
+      $this->all_recipients = array();
+    }
+
+    /**
+     * Clears all previously set filesystem, string, and binary
+     * attachments.  Returns void.
+     * @return void
+     */
+    public function ClearAttachments() {
+      $this->attachment = array();
+    }
+
+    /**
+     * Clears all custom headers.  Returns void.
+     * @return void
+     */
+    public function ClearCustomHeaders() {
+      $this->CustomHeader = array();
+    }
+
+    /////////////////////////////////////////////////
+    // CLASS METHODS, MISCELLANEOUS
+    /////////////////////////////////////////////////
+
+    /**
+     * Adds the error message to the error container.
+     * @access protected
+     * @param string $msg
+     * @return void
+     */
+    protected function SetError($msg) {
+      $this->error_count++;
+      if ($this->Mailer == 'smtp' and !is_null($this->smtp)) {
+        $lasterror = $this->smtp->getError();
+        if (!empty($lasterror) and array_key_exists('smtp_msg', $lasterror)) {
+          $msg .= '<p>' . $this->Lang('smtp_error') . $lasterror['smtp_msg'] . "</p>\n";
+        }
+      }
+      $this->ErrorInfo = $msg;
+    }
+
+    /**
+     * Returns the proper RFC 822 formatted date.
+     * @access public
+     * @return string
+     * @static
+     */
+    public static function RFCDate() {
+      $tz = date('Z');
+      $tzs = ($tz < 0) ? '-' : '+';
+      $tz = abs($tz);
+      $tz = (int)($tz/3600)*100 + ($tz%3600)/60;
+      $result = sprintf("%s %s%04d", date('D, j M Y H:i:s'), $tzs, $tz);
+
+      return $result;
+    }
+
+    /**
+     * Returns the server hostname or 'localhost.localdomain' if unknown.
+     * @access protected
+     * @return string
+     */
+    protected function ServerHostname() {
+      if (!empty($this->Hostname)) {
+        $result = $this->Hostname;
+      } elseif (isset($_SERVER['SERVER_NAME'])) {
+        $result = $_SERVER['SERVER_NAME'];
+      } else {
+        $result = 'localhost.localdomain';
+      }
+
+      return $result;
+    }
+
+    /**
+     * Returns a message in the appropriate language.
+     * @access protected
+     * @param string $key
+     * @return string
+     */
+    protected function Lang($key) {
+      if(count($this->language) < 1) {
+        $this->SetLanguage('en'); // set the default language
+      }
+
+      if(isset($this->language[$key])) {
+        return $this->language[$key];
+      } else {
+        return 'Language string failed to load: ' . $key;
+      }
+    }
+
+    /**
+     * Returns true if an error occurred.
+     * @access public
+     * @return bool
+     */
+    public function IsError() {
+      return ($this->error_count > 0);
+    }
+
+    /**
+     * Changes every end of line from CRLF, CR or LF to $this->LE.
+     * @access public
+     * @param string $str String to FixEOL
+     * @return string
+     */
+    public function FixEOL($str) {
+    // condense down to \n
+    $nstr = str_replace(array("\r\n", "\r"), "\n", $str);
+    // Now convert LE as needed
+    if ($this->LE !== "\n") {
+      $nstr = str_replace("\n", $this->LE, $nstr);
+    }
+      return  $nstr;
+    }
+
+    /**
+     * Adds a custom header. $name value can be overloaded to contain
+     * both header name and value (name:value)
+     * @access public
+     * @param string $name custom header name
+     * @param string $value header value
+     * @return void
+     */
+    public function AddCustomHeader($name, $value=null) {
+    if ($value === null) {
+      // Value passed in as name:value
+      $this->CustomHeader[] = explode(':', $name, 2);
+    } else {
+      $this->CustomHeader[] = array($name, $value);
+    }
+    }
+
+    /**
+     * Evaluates the message and returns modifications for inline images and backgrounds
+     * @access public
+     * @param string $message Text to be HTML modified
+     * @param string $basedir baseline directory for path
+     * @return string $message
+     */
+    public function MsgHTML($message, $basedir = '') {
+      preg_match_all("/(src|background)=[\"'](.*)[\"']/Ui", $message, $images);
+      if(isset($images[2])) {
+        foreach($images[2] as $i => $url) {
+          // do not change urls for absolute images (thanks to corvuscorax)
+          if (!preg_match('#^[A-z]+://#', $url)) {
+            $filename = basename($url);
+            $directory = dirname($url);
+            if ($directory == '.') {
+              $directory = '';
+            }
+            $cid = 'cid:' . md5($url);
+            $ext = pathinfo($filename, PATHINFO_EXTENSION);
+            $mimeType  = self::_mime_types($ext);
+            if ( strlen($basedir) > 1 && substr($basedir, -1) != '/') { $basedir .= '/'; }
+            if ( strlen($directory) > 1 && substr($directory, -1) != '/') { $directory .= '/'; }
+            if ( $this->AddEmbeddedImage($basedir.$directory.$filename, md5($url), $filename, 'base64', $mimeType) ) {
+              $message = preg_replace("/".$images[1][$i]."=[\"']".preg_quote($url, '/')."[\"']/Ui", $images[1][$i]."=\"".$cid."\"", $message);
+            }
+          }
+        }
+      }
+      $this->IsHTML(true);
+      $this->Body = $message;
+      if (empty($this->AltBody)) {
+          $textMsg = trim(strip_tags(preg_replace('/<(head|title|style|script)[^>]*>.*?<\/\\1>/s', '', $message)));
+          if (!empty($textMsg)) {
+              $this->AltBody = html_entity_decode($textMsg, ENT_QUOTES, $this->CharSet);
+          }
+      }
+      if (empty($this->AltBody)) {
+        $this->AltBody = 'To view this email message, open it in a program that understands HTML!' . "\n\n";
+      }
+      return $message;
+    }
+
+    /**
+     * Gets the MIME type of the embedded or inline image
+     * @param string $ext File extension
+     * @access public
+     * @return string MIME type of ext
+     * @static
+     */
+    public static function _mime_types($ext = '') {
+      $mimes = array(
+        'xl'    =>  'application/excel',
+        'hqx'   =>  'application/mac-binhex40',
+        'cpt'   =>  'application/mac-compactpro',
+        'bin'   =>  'application/macbinary',
+        'doc'   =>  'application/msword',
+        'word'  =>  'application/msword',
+        'class' =>  'application/octet-stream',
+        'dll'   =>  'application/octet-stream',
+        'dms'   =>  'application/octet-stream',
+        'exe'   =>  'application/octet-stream',
+        'lha'   =>  'application/octet-stream',
+        'lzh'   =>  'application/octet-stream',
+        'psd'   =>  'application/octet-stream',
+        'sea'   =>  'application/octet-stream',
+        'so'    =>  'application/octet-stream',
+        'oda'   =>  'application/oda',
+        'pdf'   =>  'application/pdf',
+        'ai'    =>  'application/postscript',
+        'eps'   =>  'application/postscript',
+        'ps'    =>  'application/postscript',
+        'smi'   =>  'application/smil',
+        'smil'  =>  'application/smil',
+        'mif'   =>  'application/vnd.mif',
+        'xls'   =>  'application/vnd.ms-excel',
+        'ppt'   =>  'application/vnd.ms-powerpoint',
+        'wbxml' =>  'application/vnd.wap.wbxml',
+        'wmlc'  =>  'application/vnd.wap.wmlc',
+        'dcr'   =>  'application/x-director',
+        'dir'   =>  'application/x-director',
+        'dxr'   =>  'application/x-director',
+        'dvi'   =>  'application/x-dvi',
+        'gtar'  =>  'application/x-gtar',
+        'php3'  =>  'application/x-httpd-php',
+        'php4'  =>  'application/x-httpd-php',
+        'php'   =>  'application/x-httpd-php',
+        'phtml' =>  'application/x-httpd-php',
+        'phps'  =>  'application/x-httpd-php-source',
+        'js'    =>  'application/x-javascript',
+        'swf'   =>  'application/x-shockwave-flash',
+        'sit'   =>  'application/x-stuffit',
+        'tar'   =>  'application/x-tar',
+        'tgz'   =>  'application/x-tar',
+        'xht'   =>  'application/xhtml+xml',
+        'xhtml' =>  'application/xhtml+xml',
+        'zip'   =>  'application/zip',
+        'mid'   =>  'audio/midi',
+        'midi'  =>  'audio/midi',
+        'mp2'   =>  'audio/mpeg',
+        'mp3'   =>  'audio/mpeg',
+        'mpga'  =>  'audio/mpeg',
+        'aif'   =>  'audio/x-aiff',
+        'aifc'  =>  'audio/x-aiff',
+        'aiff'  =>  'audio/x-aiff',
+        'ram'   =>  'audio/x-pn-realaudio',
+        'rm'    =>  'audio/x-pn-realaudio',
+        'rpm'   =>  'audio/x-pn-realaudio-plugin',
+        'ra'    =>  'audio/x-realaudio',
+        'wav'   =>  'audio/x-wav',
+        'bmp'   =>  'image/bmp',
+        'gif'   =>  'image/gif',
+        'jpeg'  =>  'image/jpeg',
+        'jpe'   =>  'image/jpeg',
+        'jpg'   =>  'image/jpeg',
+        'png'   =>  'image/png',
+        'tiff'  =>  'image/tiff',
+        'tif'   =>  'image/tiff',
+        'eml'   =>  'message/rfc822',
+        'css'   =>  'text/css',
+        'html'  =>  'text/html',
+        'htm'   =>  'text/html',
+        'shtml' =>  'text/html',
+        'log'   =>  'text/plain',
+        'text'  =>  'text/plain',
+        'txt'   =>  'text/plain',
+        'rtx'   =>  'text/richtext',
+        'rtf'   =>  'text/rtf',
+        'xml'   =>  'text/xml',
+        'xsl'   =>  'text/xml',
+        'mpeg'  =>  'video/mpeg',
+        'mpe'   =>  'video/mpeg',
+        'mpg'   =>  'video/mpeg',
+        'mov'   =>  'video/quicktime',
+        'qt'    =>  'video/quicktime',
+        'rv'    =>  'video/vnd.rn-realvideo',
+        'avi'   =>  'video/x-msvideo',
+        'movie' =>  'video/x-sgi-movie'
+      );
+      return (!isset($mimes[strtolower($ext)])) ? 'application/octet-stream' : $mimes[strtolower($ext)];
+    }
+
+    /**
+    * Set (or reset) Class Objects (variables)
+    *
+    * Usage Example:
+    * $page->set('X-Priority', '3');
+    *
+    * @access public
+    * @param string $name Parameter Name
+    * @param mixed $value Parameter Value
+    * NOTE: will not work with arrays, there are no arrays to set/reset
+     * @throws phpmailerException
+     * @return bool
+    * @todo Should this not be using __set() magic function?
+    */
+    public function set($name, $value = '') {
+      try {
+        if (isset($this->$name) ) {
+          $this->$name = $value;
+        } else {
+          throw new phpmailerException($this->Lang('variable_set') . $name, self::STOP_CRITICAL);
+        }
+      } catch (Exception $e) {
+        $this->SetError($e->getMessage());
+        if ($e->getCode() == self::STOP_CRITICAL) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    /**
+     * Strips newlines to prevent header injection.
+     * @access public
+     * @param string $str String
+     * @return string
+     */
+    public function SecureHeader($str) {
+      return trim(str_replace(array("\r", "\n"), '', $str));
+    }
+
+    /**
+     * Set the private key file and password to sign the message.
+     *
+     * @access public
+     * @param $cert_filename
+     * @param string $key_filename Parameter File Name
+     * @param string $key_pass Password for private key
+     */
+    public function Sign($cert_filename, $key_filename, $key_pass) {
+      $this->sign_cert_file = $cert_filename;
+      $this->sign_key_file = $key_filename;
+      $this->sign_key_pass = $key_pass;
+    }
+
+    /**
+     * Set the private key file and password to sign the message.
+     *
+     * @access public
+     * @param string $txt
+     * @return string
+     */
+    public function DKIM_QP($txt) {
+      $line = '';
+      for ($i = 0; $i < strlen($txt); $i++) {
+        $ord = ord($txt[$i]);
+        if ( ((0x21 <= $ord) && ($ord <= 0x3A)) || $ord == 0x3C || ((0x3E <= $ord) && ($ord <= 0x7E)) ) {
+          $line .= $txt[$i];
+        } else {
+          $line .= "=".sprintf("%02X", $ord);
+        }
+      }
+      return $line;
+    }
+
+    /**
+     * Generate DKIM signature
+     *
+     * @access public
+     * @param string $s Header
+     * @return string
+     */
+    public function DKIM_Sign($s) {
+      $privKeyStr = file_get_contents($this->DKIM_private);
+      if ($this->DKIM_passphrase != '') {
+        $privKey = openssl_pkey_get_private($privKeyStr, $this->DKIM_passphrase);
+      } else {
+        $privKey = $privKeyStr;
+      }
+      if (openssl_sign($s, $signature, $privKey)) {
+        return base64_encode($signature);
+      }
+      return '';
+    }
+
+    /**
+     * Generate DKIM Canonicalization Header
+     *
+     * @access public
+     * @param string $s Header
+     * @return string
+     */
+    public function DKIM_HeaderC($s) {
+      $s = preg_replace("/\r\n\s+/", " ", $s);
+      $lines = explode("\r\n", $s);
+      foreach ($lines as $key => $line) {
+        list($heading, $value) = explode(":", $line, 2);
+        $heading = strtolower($heading);
+        $value = preg_replace("/\s+/", " ", $value) ; // Compress useless spaces
+        $lines[$key] = $heading.":".trim($value) ; // Don't forget to remove WSP around the value
+      }
+      $s = implode("\r\n", $lines);
+      return $s;
+    }
+
+    /**
+     * Generate DKIM Canonicalization Body
+     *
+     * @access public
+     * @param string $body Message Body
+     * @return string
+     */
+    public function DKIM_BodyC($body) {
+      if ($body == '') return "\r\n";
+      // stabilize line endings
+      $body = str_replace("\r\n", "\n", $body);
+      $body = str_replace("\n", "\r\n", $body);
+      // END stabilize line endings
+      while (substr($body, strlen($body) - 4, 4) == "\r\n\r\n") {
+        $body = substr($body, 0, strlen($body) - 2);
+      }
+      return $body;
+    }
+
+    /**
+     * Create the DKIM header, body, as new header
+     *
+     * @access public
+     * @param string $headers_line Header lines
+     * @param string $subject Subject
+     * @param string $body Body
+     * @return string
+     */
+    public function DKIM_Add($headers_line, $subject, $body) {
+      $DKIMsignatureType    = 'rsa-sha1'; // Signature & hash algorithms
+      $DKIMcanonicalization = 'relaxed/simple'; // Canonicalization of header/body
+      $DKIMquery            = 'dns/txt'; // Query method
+      $DKIMtime             = time() ; // Signature Timestamp = seconds since 00:00:00 - Jan 1, 1970 (UTC time zone)
+      $subject_header       = "Subject: $subject";
+      $headers              = explode($this->LE, $headers_line);
+    $from_header          = "";
+    $to_header            = "";
+      foreach($headers as $header) {
+        if (strpos($header, 'From:') === 0) {
+          $from_header = $header;
+        } elseif (strpos($header, 'To:') === 0) {
+          $to_header = $header;
+        }
+      }
+      $from     = str_replace('|', '=7C', $this->DKIM_QP($from_header));
+      $to       = str_replace('|', '=7C', $this->DKIM_QP($to_header));
+      $subject  = str_replace('|', '=7C', $this->DKIM_QP($subject_header)) ; // Copied header fields (dkim-quoted-printable
+      $body     = $this->DKIM_BodyC($body);
+      $DKIMlen  = strlen($body) ; // Length of body
+      $DKIMb64  = base64_encode(pack("H*", sha1($body))) ; // Base64 of packed binary SHA-1 hash of body
+      $ident    = ($this->DKIM_identity == '')? '' : " i=" . $this->DKIM_identity . ";";
+      $dkimhdrs = "DKIM-Signature: v=1; a=" . $DKIMsignatureType . "; q=" . $DKIMquery . "; l=" . $DKIMlen . "; s=" . $this->DKIM_selector . ";\r\n".
+                  "\tt=" . $DKIMtime . "; c=" . $DKIMcanonicalization . ";\r\n".
+                  "\th=From:To:Subject;\r\n".
+                  "\td=" . $this->DKIM_domain . ";" . $ident . "\r\n".
+                  "\tz=$from\r\n".
+                  "\t|$to\r\n".
+                  "\t|$subject;\r\n".
+                  "\tbh=" . $DKIMb64 . ";\r\n".
+                  "\tb=";
+      $toSign   = $this->DKIM_HeaderC($from_header . "\r\n" . $to_header . "\r\n" . $subject_header . "\r\n" . $dkimhdrs);
+      $signed   = $this->DKIM_Sign($toSign);
+      return "X-PHPMAILER-DKIM: code.google.com/a/apache-extras.org/p/phpmailer/\r\n".$dkimhdrs.$signed."\r\n";
+    }
+
+    /**
+     * Perform callback
+     * @param boolean $isSent
+     * @param string $to
+     * @param string $cc
+     * @param string $bcc
+     * @param string $subject
+     * @param string $body
+     * @param string $from
+     */
+    protected function doCallback($isSent, $to, $cc, $bcc, $subject, $body, $from=null) {
+      if (!empty($this->action_function) && is_callable($this->action_function)) {
+        $params = array($isSent, $to, $cc, $bcc, $subject, $body, $from);
+        call_user_func_array($this->action_function, $params);
+      }
+    }
+  }
+
+  /**
+   * Exception handler for PHPMailer
+   * @package PHPMailer
+   */
+  class phpmailerException extends Exception {
+    /**
+     * Prettify error message output
+     * @return string
+     */
+    public function errorMessage() {
+      $errorMsg = '<strong>' . $this->getMessage() . "</strong><br />\n";
+      return $errorMsg;
+    }
+  }
+  ?>
